@@ -1,19 +1,26 @@
 package study.querydsl;
 
+import com.querydsl.core.BooleanBuilder;
 import com.querydsl.core.QueryResults;
 import com.querydsl.core.Tuple;
 import com.querydsl.core.types.Expression;
 import com.querydsl.core.types.ExpressionUtils;
+import com.querydsl.core.types.Predicate;
 import com.querydsl.core.types.Projections;
+import com.querydsl.core.types.dsl.BooleanExpression;
+import com.querydsl.core.types.dsl.Expressions;
 import com.querydsl.jpa.JPAExpressions;
 import com.querydsl.jpa.impl.JPAQueryFactory;
+import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.annotation.Commit;
 import org.springframework.transaction.annotation.Transactional;
 import study.querydsl.dto.MemberDto;
+import study.querydsl.dto.QMemberDto;
 import study.querydsl.dto.UserDto;
 import study.querydsl.entity.Member;
 import study.querydsl.entity.QMember;
@@ -62,7 +69,7 @@ public class QuerydslBasicTest {
     @DisplayName("초창기 jpql 쿼리")
     public void startJPQL() {
         //jpql은 쿼리 오타가 검증이 안됨. 런타임에서 검증된다.
-        String qlString = "select m from Member m " +
+        String qlString = "select m from Members m " +
                           "where m.username = :username";
         Member findMember = em.createQuery(qlString,Member.class)
                 .setParameter("username","member1")
@@ -494,18 +501,151 @@ public class QuerydslBasicTest {
     }
 
     @Test
-    @DisplayName("6. querydsl 프로젝션 - Projections.constructor 메서드 사용 다른 dto일떄")
-    public void findDtoByConstructorOtherDto() {
+    @DisplayName("7. querydsl 프로젝션 - Projections.constructor 컴파일 단계에서 검사를 해주지 않음")
+    public void findDtoByConstructorError() {
 
-        // constructor 메서드는 생성자 순서만 맞추면 프로젝션시 필드 네이밍이 달라도 주입가능하다
+        // constructor 메서드는 컴파일 단계에서 생성자에 대한 타입 검사를 해주지 않는다.. 아래와 같이 id 필드가 생겨버리면 런타임에서 에러가 발생
         List<UserDto> fetch = queryFactory.select(Projections.fields(UserDto.class,
                         member.username,
-                        member.age))
+                        member.age,
+                        member.id))
                 .from(member)
                 .fetch();
 
         for (UserDto userDto : fetch) {
             System.out.println("userDto = " + userDto);
         }
+    }
+
+    @Test
+    @DisplayName("8.dto생성자에 @QueryProjection 어노테이션을 활용한 방법, 컴파일 단계에서 검사를 해준다. ")
+    public void findDtoByQueryProjection() {
+
+        //@QueryProjection을 사용하여 컴파일된 q dto 클래스의 생성자는 알아서 타입을 컴파일 단계에서 타입이나 파라미터 검사해준다. 실제 dto 생성자를 호출함
+        //cmd + p 로 파라미터 순서도 확인가능
+
+        // 단점이 따로 1. dto도 컴파일을 해야함.
+        // 2. dto는 의존성이 없어야 좋은데., dto가 QueryProjection 이라는 어노테이션에 의존성이 생겨버림,
+        List<MemberDto> fetch = queryFactory.select(new QMemberDto(member.username, member.age))
+                .from(member)
+                .fetch();
+
+
+        for (MemberDto memberDto : fetch) {
+            System.out.println("memberDto = " + memberDto);
+        }
+    }
+
+
+    ////////////////////////////////////////  동적 쿼리 ////////////////////////////////////////
+    @Test
+    @DisplayName("동적쿼리 - BooleanBuilder를 활용한 동적 쿼리 작성 방법.")
+    public void dynamicQuery_BooleanBuilder() {
+        String usernameParam = "member1";
+        Integer ageParam = 10;
+
+        List <Member> result = searchMember1(usernameParam,ageParam);
+
+        assertThat(result.size()).isEqualTo(1);
+
+    }
+
+    private List<Member> searchMember1(String usernameCond, Integer ageCond) {
+
+        BooleanBuilder builder = new BooleanBuilder();
+        if(usernameCond != null) {
+            builder.and(member.username.eq(usernameCond));
+        }
+
+        if(ageCond != null) {
+            builder.and(member.age.eq(ageCond));
+        }
+
+        return queryFactory.selectFrom(member)
+                .where(builder)
+                .fetch();
+    }
+
+    @Test
+    @DisplayName("동적쿼리 - .where의 null 활용한 동적 쿼리 작성 방법. 쿼리 조립에 대한 장점")
+    public void dynamicQuery_WhereParam() {
+        String usernameParam = "member1";
+        Integer ageParam = 10;
+
+        List <Member> result = searchMember2(usernameParam,ageParam);
+
+        assertThat(result.size()).isEqualTo(1);
+    }
+
+
+    private List<Member> searchMember2(String usernameCond, Integer ageCond) {
+
+        // where 절에 null 파라미터가 들어가면 쿼리를 만들지 않는걸 이용.
+        return queryFactory.selectFrom(member)
+                .where(allEq(usernameCond, ageCond))
+                .fetch();
+    }
+
+    private BooleanExpression usernameEq(String usernameCond) {
+        return usernameCond == null ? null : member.username.eq(usernameCond);
+    }
+
+    private BooleanExpression ageEq(Integer ageCond) {
+        return ageCond == null ? null : member.age.eq(ageCond);
+    }
+
+    public BooleanExpression allEq(String usernameCond, Integer ageCond) {
+        return usernameEq(usernameCond).and(ageEq(ageCond));
+    }
+
+    //////////////// 수정 삭제 벌크 //////////////////
+
+    @Test
+    @Commit
+    @DisplayName("벌크 update 연산, 그리고 벌크 주의사항")
+    public void bulkUpdate() {
+
+        //member1 = 10 -> 비회원
+        //member2 = 20 -> 비회원
+        //member3 = 30 -> 유지
+        //member4 = 40 -> 유지
+
+        // 해당 업데이트 쿼리는 영속성 컨텍스트를 무시하고 db에서 업데이트를 친다.
+        long cound = queryFactory
+                .update(member)
+                .set(member.username,"비회원")
+                .where(member.age.lt(30))
+                .execute();
+
+        //영속성 컨텍스트와 맞추기위해서 벌크 연산후 영속성 컨텍스트를 초기화 한다.
+        em.flush();
+        em.clear();
+
+        //주의 . flush, clear를 안할경우
+        //영속성컨텍스트가 우선권이 있어서 db에서 값이 변경되서 조회를 다시 하더라도. 영속성 컨텍스트에 이미 존재하고 있다면 db조회 값을 버려버림
+        List<Member> result = queryFactory.selectFrom(member).fetch();
+
+        //해당 결과값이 db와 다르다는 것을 알 수 잇음
+        for (Member member1 : result) {
+            System.out.println("member1 = " + member1);
+        }
+
+    }
+
+    @Test
+    @DisplayName("벌크 add 연산")
+    public void bulkAdd() {
+        long count = queryFactory.update(member)
+                .set(member.age,member.age.add(1))
+                .execute();
+    }
+
+    @Test
+    @DisplayName("벌크 delete 연산")
+    public void bulkDelete() {
+        long count = queryFactory
+                .delete(member)
+                .where(member.age.gt(18))
+                .execute();
     }
 }
